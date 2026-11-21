@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RamShare</title>
+<style>
+:root{--bg:#e9eef2;--panel:#fff;--ink:#1b2a33;--mute:#5d6f7a;--teal:#0f4c5c;--amber:#b87410;--line:#cdd8df}
+@media (prefers-color-scheme:dark){:root{--bg:#10191e;--panel:#18252c;--ink:#e6eef2;--mute:#8fa4b0;--teal:#5fb3c7;--amber:#e8b05a;--line:#2b3b44}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.5 "Segoe UI",system-ui,sans-serif}
+main{max-width:1000px;margin:0 auto;padding:16px;display:grid;grid-template-columns:1fr 300px;gap:16px}
+@media(max-width:800px){main{grid-template-columns:1fr}}
+h1{font-size:1.6rem;margin:0}h2{font-size:1.05rem;margin:0 0 8px}
+header{grid-column:1/-1;display:flex;justify-content:space-between;align-items:baseline;flex-wrap:wrap;gap:8px}
+.mute{color:var(--mute);font-size:.9rem}.credits{color:var(--amber);font-weight:700}
+.box{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:16px}
+#log{height:58vh;overflow:auto;display:flex;flex-direction:column;gap:10px}
+.m{padding:10px 14px;border-radius:12px;max-width:85%;white-space:pre-wrap}
+.u{align-self:flex-end;background:var(--teal);color:#fff}@media(prefers-color-scheme:dark){.u{color:#0b1418}}
+.a{align-self:flex-start;background:var(--bg)}.err{color:#c0392b}
+form{display:flex;gap:8px;margin-top:12px}
+input,select,button{font:inherit;padding:10px 12px;border-radius:10px;border:1px solid var(--line);background:var(--panel);color:var(--ink)}
+input{flex:1;min-width:0}select{width:100%;margin:8px 0}
+button.go{background:var(--teal);color:#fff;border:0;cursor:pointer;width:auto}
+@media(prefers-color-scheme:dark){button.go{color:#0b1418}}
+button.go:disabled{opacity:.5;cursor:default}button.full{width:100%}
+progress{width:100%;height:8px;margin-top:8px}
+</style></head><body><main>
+<header><h1>RamShare</h1>
+  <span class="mute"><span id="net">Connecting…</span> · Credits <span class="credits" id="cr">–</span></span></header>
+
+<section class="box">
+  <div id="log"><div class="m a">Hi. This AI runs on laptops lent by other people. Ask me anything. If nobody is sharing yet, start the network by sharing yours.</div></div>
+  <form id="cf"><input id="ci" placeholder="Ask anything" autocomplete="off" maxlength="2000"><button class="go" id="cb">Send</button></form>
+</section>
+
+<aside class="box">
+  <h2>Share my laptop</h2>
+  <p class="mute">Your laptop runs the AI for others and you earn 1 credit per word-piece. Credits pay for your own chats. Turn it off any time.</p>
+  <select id="pm">
+    <option value="Llama-3.2-1B-Instruct-q4f16_1-MLC">Small (1B, needs about 2 GB free RAM)</option>
+    <option value="Qwen2.5-1.5B-Instruct-q4f16_1-MLC">Medium (1.5B, about 3 GB)</option>
+    <option value="Llama-3.2-3B-Instruct-q4f16_1-MLC">Large (3B, about 4 GB)</option>
+  </select>
+  <button class="go full" id="pb">Start sharing</button>
+  <progress id="pg" max="1" value="0" hidden></progress>
+  <p class="mute" id="ps"></p>
+  <p class="mute">Keep this tab open while sharing. Chats are visible to the laptop that answers them, so don't type secrets.</p>
+</aside>
+</main>
+<script type="module">
+import * as webllm from "https://esm.run/@mlc-ai/web-llm@0.2.79";
+const $=id=>document.getElementById(id);
+let cid; try{cid=localStorage.cid||(localStorage.cid=crypto.randomUUID())}catch{cid=crypto.randomUUID()}
+let ws,history=[],cur,engine=null,sharing=false;
+
+function connect(){
+  ws=new WebSocket((location.protocol==='https:'?'wss://':'ws://')+location.host);
+  ws.onopen=()=>{ws.send(JSON.stringify({type:'hello',cid}));if(sharing)ws.send(JSON.stringify({type:'provider_on'}))};
+  ws.onclose=()=>{$('net').textContent='Reconnecting…';setTimeout(connect,2000)};
+  ws.onmessage=async e=>{const m=JSON.parse(e.data);
+    if(m.type==='ready'||m.type==='credits')$('cr').textContent=m.credits;
+    if(m.type==='stats')$('net').textContent=m.providers+' laptop'+(m.providers==1?'':'s')+' sharing'+(m.queued?', '+m.queued+' waiting':'');
+    if(m.type==='chunk'){cur.textContent+=m.text;$('log').scrollTop=1e9}
+    if(m.type==='done'){history.push({role:'assistant',content:cur.textContent});$('cr').textContent=m.credits;$('cb').disabled=false}
+    if(m.type==='error'&&cur){cur.textContent=m.message;cur.classList.add('err');$('cb').disabled=false;history.pop()}
+    if(m.type==='job')runJob(m);
+  };
+}
+connect();
+
+function addMsg(c,t){const d=document.createElement('div');d.className='m '+c;d.textContent=t;$('log').appendChild(d);$('log').scrollTop=1e9;return d}
+$('cf').onsubmit=e=>{e.preventDefault();const t=$('ci').value.trim();if(!t||ws.readyState!==1)return;
+  $('ci').value='';history.push({role:'user',content:t});addMsg('u',t);cur=addMsg('a','');$('cb').disabled=true;
+  ws.send(JSON.stringify({type:'chat',id:String(Date.now()),messages:history}))};
+
+async function runJob(m){
+  $('ps').textContent='Answering someone’s question…';let n=0;
+  try{const s=await engine.chat.completions.create({messages:m.messages,stream:true,max_tokens:600});
+    for await(const ch of s){const t=ch.choices[0]?.delta?.content;if(t){n++;ws.send(JSON.stringify({type:'chunk',jobId:m.jobId,text:t}))}}
+    ws.send(JSON.stringify({type:'done',jobId:m.jobId,tokens:n}));
+  }catch{ws.send(JSON.stringify({type:'error',jobId:m.jobId}))}
+  if(sharing)$('ps').textContent='Sharing. Waiting for the next question.';
+}
+
+$('pb').onclick=async()=>{
+  if(sharing){sharing=false;ws.send(JSON.stringify({type:'provider_off'}));
+    try{await engine.unload()}catch{} engine=null;$('pb').textContent='Start sharing';$('ps').textContent='Sharing stopped.';$('pm').disabled=false;return}
+  if(!navigator.gpu){$('ps').textContent='This browser has no WebGPU. Use recent Chrome or Edge on a laptop.';return}
+  $('pb').disabled=true;$('pm').disabled=true;$('pg').hidden=false;
+  try{engine=await webllm.CreateMLCEngine($('pm').value,{initProgressCallback:p=>{$('pg').value=p.progress;$('ps').textContent=p.text}});
+    sharing=true;$('pg').hidden=true;$('pb').textContent='Stop sharing';$('pb').disabled=false;
+    $('ps').textContent='Sharing. Waiting for the next question.';ws.send(JSON.stringify({type:'provider_on'}));
+  }catch(err){$('ps').textContent='Could not load the model: '+err.message;$('pb').disabled=false;$('pm').disabled=false;$('pg').hidden=true}
+};
+addEventListener('beforeunload',e=>{if(sharing){e.preventDefault()}});
+</script></body></html>
